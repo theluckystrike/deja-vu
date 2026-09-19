@@ -793,9 +793,13 @@ func inspectDoctorIndex(dir string, storeMods []time.Time) doctorIndexReport {
 	if ov, err := index.Overview(dir); err == nil {
 		result.SessionsAhead = ov.Future
 	}
-	builtAt := index.ManifestBuiltAt(dir)
+	// When deja last read the stores, not when the manifest was last written:
+	// a sync import writes the manifest and never looks at a local
+	// transcript, so comparing against the build time reported zero stale
+	// stores on a machine that syncs on a timer (#3747).
+	readAt := index.ManifestSourcesReadAt(dir)
 	for _, mod := range storeMods {
-		if !mod.IsZero() && mod.After(builtAt) {
+		if !mod.IsZero() && mod.After(readAt) {
 			result.StaleStores++
 		}
 	}

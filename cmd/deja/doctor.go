@@ -2118,12 +2118,12 @@ func doctorIndex(w io.Writer, idx doctorIndexReport, dir string) {
 	switch idx.State {
 	case "stale":
 		if idx.StaleStores == 1 {
-			fmt.Fprintln(w, "  freshness 1 store changed since last build — run `deja index`")
+			fmt.Fprintln(w, "  freshness 1 store changed since deja last read it — run `deja index`")
 		} else {
-			fmt.Fprintf(w, "  freshness %d stores changed since last build — run `deja index`\n", idx.StaleStores)
+			fmt.Fprintf(w, "  freshness %d stores changed since deja last read them — run `deja index`\n", idx.StaleStores)
 		}
 	case "stale-readonly":
-		fmt.Fprintf(w, "  freshness %s changed since last build, and the index cannot be written — check the permissions on %s, or point DEJA_INDEX_DIR somewhere writable\n",
+		fmt.Fprintf(w, "  freshness %s changed since deja last read it, and the index cannot be written — check the permissions on %s, or point DEJA_INDEX_DIR somewhere writable\n",
 			doctorCount(idx.StaleStores, "store"), filepath.Dir(idx.Path))
 	default:
 		fmt.Fprintln(w, "  freshness up to date")
