@@ -46,9 +46,8 @@ func main() {
 	}
 	// A command that lands mid-rebuild waits for the whole of it, and silence
 	// there reads as a hang rather than as a queue (#994).
-	index.LockWaitNotice = func() {
-		fmt.Fprintln(os.Stderr, "deja: another deja is building the index — waiting for it to finish")
-	}
+	wait := &waitLine{w: os.Stderr, live: briefWanted(os.Stderr)}
+	index.LockWaitNotice, index.LockWaitDone = wait.begin, wait.end
 	// A detached warmup is index work nobody asked for at a moment somebody is
 	// working, so it takes less than a foreground run would (#3500).
 	takeWarmupBudget()
@@ -2341,6 +2340,12 @@ func commandHint(q string) string {
 	// The same shape for the other undo nobody can guess: removing a note is
 	// `forget` on the note's own id, and the reader who typed this has no way
 	// to know a note has an id at all (#1085).
+	// brew and npm call it upgrade, and three edits is too far for the
+	// nearest-name match to reach `update`. The search still runs: "upgrade"
+	// is also something people search their history for.
+	if strings.EqualFold(first, "upgrade") {
+		return "deja: \"upgrade\" is not a command — `deja update` updates deja itself\n"
+	}
 	if strings.EqualFold(first, "unpromote") || strings.EqualFold(first, "demote") {
 		return "deja: \"" + first + "\" is not a command — `deja promote <id> --state rejected` takes a decision back, and `deja forget --session deja-note-<harness>-<id>` removes the note itself\n"
 	}
@@ -2694,7 +2699,20 @@ func ambiguousJSONPrefix(dir, id string) error {
 	return fmt.Errorf("%d sessions match %q — --json reads one; use a longer prefix (`deja last` prints ids whole)", n, id)
 }
 
+// pickedOnScreen is the session the interactive screen handed to resume or
+// handoff. It is looked up by its exact identity, with no refresh first: after
+// an upgrade the refresh is a full rebuild, and the person who picked a
+// session watched "waiting for it to finish" under a closed screen. And an id
+// is not a prefix: one that starts another session's id handed off "the most
+// recent" of them, which need not be the one picked.
+var pickedOnScreen *model.Session
+
 func findByPrefix(dir, p string) (model.Session, bool, error) {
+	if s := pickedOnScreen; s != nil && p == s.ID {
+		if full, ok, err := index.FindByIdentity(dir, s.Harness, s.ID); err == nil && ok {
+			return full, true, nil
+		}
+	}
 	if err := index.Ensure(dir, "", false, os.Stderr); err == nil {
 		if s, ok, err := index.FindByPrefix(dir, p); err == nil {
 			if ok {
