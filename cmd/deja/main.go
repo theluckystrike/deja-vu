@@ -1719,8 +1719,8 @@ func searchWithOptions(dir string, args []string, sourceInstance string, bare bo
 		// An empty search is a moment for the mark, but only at a terminal
 		// and never into a pipe a script reads (#4624).
 		if !o.JSON && logoWanted(os.Stdout) {
-			mood, line := searchCatMoment(true)
-			printLogoMood(os.Stdout, []string{line}, mood)
+			mood, _ := searchCatMoment(true)
+			printLogoMood(os.Stdout, nil, mood)
 		}
 		// The policy is named before the generic advice: "try fewer words" is
 		// wrong counsel for someone whose words were fine (#680). A filter the

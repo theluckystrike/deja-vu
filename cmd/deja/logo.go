@@ -177,13 +177,14 @@ func printLogoMood(w io.Writer, info []string, mood catMood) {
 }
 
 // searchCatMoment gives the mark a moment beside a search (#4624). An empty
-// search is a surprised cat that says nothing matched; the first recall that
-// found something is a ready cat that says there is an answer. The caller shows it
-// only on a terminal and never as JSON, the same gating logoWanted and the
-// --json branch apply everywhere else.
+// search is a surprised cat with no line of its own: the lines under it say
+// why, and the reason is not always that nothing matched (a filter, the trust
+// policy). The first recall that found something is a ready cat that says
+// there is an answer. The caller shows it only on a terminal and never as
+// JSON, the same gating logoWanted and the --json branch apply everywhere else.
 func searchCatMoment(empty bool) (catMood, string) {
 	if empty {
-		return moodSurprised, "nothing in the history matches that"
+		return moodSurprised, ""
 	}
 	return moodReady, "found something in your history"
 }

@@ -2,27 +2,69 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vshulcz/deja-vu/internal/index"
 )
 
 // #4624: the cat has a moment beside an empty search and beside a first recall
-// that finds something, in a terminal only. The sprite renders for both, and
-// each carries a line that says which moment it is. The terminal-only gating is
-// tested separately in logo_devnull_test.go (logoWanted) and at the runSearch
-// call sites; these tests pin the rendering that the gated call sites show.
+// that finds something, in a terminal only. logoWanted's own gating is tested
+// in logo_devnull_test.go; TestCatMomentsAtTheSearch below covers the call
+// sites, and these pin the rendering they show.
 func TestCatMomentShowsOnEmptySearch(t *testing.T) {
 	var b bytes.Buffer
 	mood, line := searchCatMoment(true) // empty search
-	printLogoMood(&b, []string{line}, mood)
+	if line != "" {
+		t.Fatalf("the empty-search cat says %q, which a filter or the trust policy can make untrue", line)
+	}
+	printLogoMood(&b, nil, mood)
 	out := b.String()
-	// The sprite (half blocks) and the empty-search line are both present.
 	if !strings.Contains(out, "█") && !strings.Contains(out, "▀") && !strings.Contains(out, "▄") {
 		t.Fatalf("empty-search cat rendered no sprite: %q", out)
 	}
-	if !strings.Contains(out, "nothing") {
-		t.Fatalf("empty-search cat should say nothing matched: %q", out)
+}
+
+// At the search itself: a terminal gets the cat on an empty search and once
+// on the first that finds something; --json never does.
+func TestCatMomentsAtTheSearch(t *testing.T) {
+	withTempStores(t)
+	root := t.TempDir()
+	t.Setenv("DEJA_CLAUDE_ROOT", root)
+	user, _ := json.Marshal(map[string]any{"type": "user", "sessionId": "a1", "cwd": "/work/pay", "timestamp": "2026-03-01T10:00:00Z",
+		"message": map[string]any{"role": "user", "content": "the retry reused the idempotency key"}})
+	writeClaudeFixture(t, filepath.Join(root, "pay", "a1.jsonl"), "a1", []string{string(user)})
+	dir := os.Getenv("DEJA_INDEX_DIR")
+	if err := index.Ensure(dir, "", false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	// The build greets with a logo of its own; this is about the search.
+	index.LastBuild = index.BuildSummary{}
+	saved := logoWanted
+	logoWanted = func(*os.File) bool { return true }
+	t.Cleanup(func() { logoWanted = saved })
+	run := func(args ...string) string {
+		return captureStdout(t, func() { _ = searchWithOptions(dir, args, "", false) })
+	}
+	cat := "▀"
+	if out := run("zzqqxx", "--json"); strings.Contains(out, cat) {
+		t.Errorf("--json drew the cat:\n%s", out)
+	}
+	if out := run("zzqqxx", "--since", "1d"); !strings.Contains(out, cat) || strings.Contains(out, "matches that") {
+		t.Errorf("empty search under a filter:\n%s", out)
+	}
+	if out := run("idempotency", "--json"); strings.Contains(out, cat) {
+		t.Errorf("--json drew the first-recall cat:\n%s", out)
+	}
+	if out := run("idempotency"); !strings.Contains(out, "found something") {
+		t.Errorf("first recall got no cat:\n%s", out)
+	}
+	if out := run("idempotency"); strings.Contains(out, "found something") {
+		t.Errorf("second recall got the cat again:\n%s", out)
 	}
 }
 
