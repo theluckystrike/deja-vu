@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -102,10 +103,16 @@ func startReleaseNotice(args []string, interactive bool, dir string, now time.Ti
 }
 
 // finish prints the line when the last look found a newer release and the
-// line has not been shown in the last day.
+// line has not been shown in the last day. Before that it prints, once per
+// version, what a new version brings on its first run after an upgrade.
 func (n *releaseNotice) finish(w io.Writer, exe string) {
 	if n == nil {
 		return
+	}
+	// The first run of a new version says once what it brings (#4619). The
+	// stamp is `<dir>.release`, so the dir is the stamp without the suffix.
+	if msg := whatChangedTerminal(strings.TrimSuffix(n.stamp, ".release")); msg != "" {
+		fmt.Fprint(w, msg)
 	}
 	s := readReleaseStamp(n.stamp)
 	if n.now.Sub(time.Unix(s.Shown, 0)) < releaseNoticeInterval {

@@ -64,8 +64,9 @@ func weekNoteAt(dir string, now time.Time) string {
 }
 
 // humanNotes is what deja has to tell the person rather than the model: the
-// one-time built note and the weekly count. Each marks itself shown, so
-// whichever surface prints them first is the only one that does.
+// one-time built note, the weekly count, and the one-time what-changed note
+// for a new version. Each marks itself shown, so whichever surface prints
+// them first is the only one that does.
 func humanNotes(dir string) string {
-	return joinNotes(builtNote(dir), weekNote(dir))
+	return joinNotes(builtNote(dir), joinNotes(weekNote(dir), whatChangedNote(dir)))
 }
