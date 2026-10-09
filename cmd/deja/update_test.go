@@ -189,8 +189,8 @@ func TestUpdateCommandShapeAndPlatforms(t *testing.T) {
 	if err := run([]string{"update", "unexpected"}); err == nil || !strings.Contains(err.Error(), "takes no arguments") {
 		t.Fatalf("dispatcher error = %v", err)
 	}
-	out, err := captureRun(t)
-	if err != nil || !strings.Contains(out, "deja help") {
+	out, err := captureRun(t, "help")
+	if err != nil || !strings.Contains(out, "deja update") {
 		t.Fatalf("usage output = %q, error = %v", out, err)
 	}
 

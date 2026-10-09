@@ -1,11 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"strings"
 	"testing"
-
-	"github.com/vshulcz/deja-vu/internal/index"
 )
 
 // A bare `deja` into a pipe or a script used to print the full usage block,
@@ -14,18 +11,28 @@ import (
 // kept behind `deja help`. This test pins the welcome shape.
 func TestBareDejaPrintsWelcomeNotFullUsage(t *testing.T) {
 	hermeticEnv(t)
-	var out bytes.Buffer
-	if err := printWelcome(index.DefaultDir(), &out); err != nil {
+	out, err := captureRun(t)
+	if err != nil {
 		t.Fatal(err)
 	}
-	s := out.String()
-	if strings.Contains(s, "Usage:") {
-		t.Fatalf("welcome fell back to the full usage block:\n%s", s)
+	if strings.Contains(out, "Usage:") {
+		t.Fatalf("welcome fell back to the full usage block:\n%s", out)
 	}
-	if !strings.Contains(s, "deja help") {
-		t.Fatalf("welcome does not point at the full list behind deja help:\n%s", s)
+	for _, want := range []string{"nothing indexed yet", "deja <query>", "deja help"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("welcome is missing %q:\n%s", want, out)
+		}
 	}
-	if !strings.Contains(s, "deja ") {
-		t.Fatalf("welcome does not suggest one thing to try:\n%s", s)
+
+	withTempStores(t)
+	if _, err := captureRun(t, "index"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = captureRun(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "indexed across") {
+		t.Fatalf("welcome does not say what is indexed:\n%s", out)
 	}
 }
