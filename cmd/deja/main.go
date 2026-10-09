@@ -376,8 +376,11 @@ func run(args []string) error {
 		if briefWanted(os.Stdout) {
 			return runBrief(dir, os.Stdout)
 		}
-		printUsage()
-		return nil
+		// Into a pipe or a script nobody asked for a screen, so the full
+		// usage block is the wrong answer. A short welcome names what is
+		// indexed and one thing to try; the full list stays behind `deja
+		// help` (#4621).
+		return printWelcome(dir, os.Stdout)
 	}
 	sourceInstance := os.Getenv("DEJA_SOURCE_INSTANCE")
 	warnBrokenPolicy(args[0], os.Stderr)
@@ -4153,6 +4156,27 @@ var helpHidden = map[string]bool{
 
 func printUsage() {
 	fmt.Print(wrapUsage(usageText(), printableWidth(os.Stdout)))
+}
+
+// printWelcome is what a bare `deja` into a pipe or a script shows instead of
+// the full usage block. The reader asked for nothing, so the answer is one
+// fact about their own index and one thing to try, with the full list kept
+// behind `deja help` (#4621). It must not error on an empty or absent index.
+func printWelcome(dir string, w io.Writer) error {
+	ov, err := index.OverviewServable(dir)
+	if err != nil {
+		ov = index.OverviewStats{}
+	}
+	line := "deja - persistent memory for coding agents\n"
+	if ov.Sessions > 0 {
+		line += fmt.Sprintf("%d sessions indexed across %d harnesses\n", ov.Sessions, ov.Harnesses)
+	} else {
+		line += "nothing indexed yet\n"
+	}
+	line += "try: deja \"a question about your work\"\n"
+	line += "full list: deja help\n"
+	_, err = io.WriteString(w, line)
+	return err
 }
 
 // usageText renders the usage block so `--help` on a single command can quote

@@ -190,7 +190,7 @@ func TestUpdateCommandShapeAndPlatforms(t *testing.T) {
 		t.Fatalf("dispatcher error = %v", err)
 	}
 	out, err := captureRun(t)
-	if err != nil || !strings.Contains(out, "deja update") {
+	if err != nil || !strings.Contains(out, "deja help") {
 		t.Fatalf("usage output = %q, error = %v", out, err)
 	}
 

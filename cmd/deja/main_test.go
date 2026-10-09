@@ -81,7 +81,7 @@ func TestRunDispatcherSyntheticFixtures(t *testing.T) {
 		want    string
 		wantErr string
 	}{
-		{"usage", nil, "Usage:", ""},
+		{"usage", nil, "deja help", ""},
 		{"version", []string{"version"}, "deja dev", ""},
 		{"search", []string{"frobnicator"}, "frobnicator bug", ""},
 		{"search json", []string{"--json", "frobnicator"}, `"count"`, ""},
