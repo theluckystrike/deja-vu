@@ -176,6 +176,31 @@ func printLogoMood(w io.Writer, info []string, mood catMood) {
 	}
 }
 
+// searchCatMoment gives the mark a moment beside a search (#4624). An empty
+// search is a surprised cat that says nothing matched; the first recall that
+// found something is a ready cat that says there is an answer. The caller shows it
+// only on a terminal and never as JSON, the same gating logoWanted and the
+// --json branch apply everywhere else.
+func searchCatMoment(empty bool) (catMood, string) {
+	if empty {
+		return moodSurprised, "nothing in the history matches that"
+	}
+	return moodReady, "found something in your history"
+}
+
+// firstRecall reports whether this is the first search on the index at dir
+// that found something, and records it, so the ready cat greets that moment
+// once instead of sitting above every result list. Same marker idea as
+// builtNote: a file beside the index. A marker that cannot be written keeps
+// the cat quiet rather than showing it on every search.
+func firstRecall(dir string) bool {
+	marker := dir + ".firstrecall"
+	if _, err := os.Stat(marker); err == nil {
+		return false
+	}
+	return os.WriteFile(marker, []byte("1"), 0o600) == nil
+}
+
 func spaces(n int) string {
 	if n < 1 {
 		n = 1
