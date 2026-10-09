@@ -1719,6 +1719,12 @@ func searchWithOptions(dir string, args []string, sourceInstance string, bare bo
 	}
 	mistyped := false
 	if len(hits) == 0 {
+		// An empty search is a moment for the mark, but only at a terminal
+		// and never into a pipe a script reads (#4624).
+		if !o.JSON && logoWanted(os.Stdout) {
+			mood, _ := searchCatMoment(true)
+			printLogoMood(os.Stdout, nil, mood)
+		}
 		// The policy is named before the generic advice: "try fewer words" is
 		// wrong counsel for someone whose words were fine (#680). A filter the
 		// caller set is the same kind of fact, and `deja last` has named it all
@@ -1786,6 +1792,12 @@ func searchWithOptions(dir string, args []string, sourceInstance string, bare bo
 	// so the statusline and the impact screen still speak only for memory that
 	// reached an agent.
 	counted := &countingWriter{w: os.Stdout}
+	// The first recall that finds something is a moment for the mark, once per
+	// index, only at a terminal and never into a pipe or as JSON (#4624).
+	if len(hits) > 0 && !o.JSON && logoWanted(os.Stdout) && firstRecall(dir) {
+		mood, line := searchCatMoment(false)
+		printLogoMood(os.Stdout, []string{line}, mood)
+	}
 	search.Print(counted, hits, o)
 	usage.RecordResult(dir, usage.KindSearch, counted.n, len(hits), len(hits) == 0)
 	// A stamp that has not happened is a date the reader cannot use, and recency
