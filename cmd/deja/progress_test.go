@@ -133,3 +133,37 @@ func itoa(n int) string {
 	}
 	return string(b)
 }
+
+// The cat in the first-build display is not a static stamp: its tail wags
+// through the same cycle as the interactive screen. The mark is the left block
+// of each frame, so the info column (spinner, phase, bar, stores) is stripped
+// before comparing, or the spinner alone would make every frame look different
+// and the test would prove nothing (#4623).
+func TestBuildProgressWagsTheTail(t *testing.T) {
+	p := newBuildProgress(&bytes.Buffer{})
+	p.Phase("reading sessions", 10)
+	p.Advance(5)
+	mark := func(frame int) string {
+		var b strings.Builder
+		for _, l := range p.render(frame) {
+			plain := ansiRE.ReplaceAllString(l, "")
+			r := []rune(plain)
+			if len(r) > 28 {
+				r = r[:28]
+			}
+			b.WriteString(string(r))
+			b.WriteByte('\n')
+		}
+		return b.String()
+	}
+	// Frames 0 and 1 are the same wag pose (one pose every four frames), so
+	// their mark must be identical. A difference here would be the spinner,
+	// which lives in the info column and is stripped above.
+	if mark(0) != mark(1) {
+		t.Fatal("the mark changed between two frames of the same wag pose")
+	}
+	// Frames 0 and 4 are a full pose apart, so the tail must have moved.
+	if mark(0) == mark(4) {
+		t.Fatal("the tail did not wag across a full pose cycle")
+	}
+}

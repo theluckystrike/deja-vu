@@ -116,6 +116,17 @@ func logoInfoStart(info []string) (col int, stacked bool) {
 // layout has to be shared with printLogo rather than reimplemented.
 func logoLines(info []string) []string { return logoLinesArt(catArt, info) }
 
+// logoLinesMood lays the same column beside a given mood, like logoLines does
+// for the ready pose. The first-build progress repaints at a fixed cadence, so
+// it passes the wagging tail instead of a static pose (#4623).
+func logoLinesMood(info []string, mood catMood) []string {
+	art := catArt
+	if mood != moodReady {
+		art = renderCat(mood)
+	}
+	return logoLinesArt(art, info)
+}
+
 func logoLinesArt(art, info []string) []string {
 	col, stacked := logoInfoStart(info)
 	out := make([]string, 0, len(art)+len(info)+2)
