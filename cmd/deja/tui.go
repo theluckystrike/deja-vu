@@ -1,8 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"io"
+	"maps"
 	"os"
 	"sync/atomic"
 	"time"
@@ -37,15 +37,17 @@ const (
 	modalHelp
 	modalPalette
 	modalNews
+	modalForget
 )
 
 type tuiApp struct {
-	dir   string
-	t     *tui.Term
-	p     painter
-	now   time.Time
-	clock func() time.Time   // nil: the wall clock; tests pin it
-	copy  func(string) error // nil: the clipboard; tests catch it
+	dir    string
+	t      *tui.Term
+	p      painter
+	now    time.Time
+	clock  func() time.Time      // nil: the wall clock; tests pin it
+	copy   func(string) error    // nil: the clipboard; tests catch it
+	forget func(id string) error // nil: `deja forget --session`; tests swap it
 
 	scope       int
 	projects    []string
@@ -93,8 +95,10 @@ type tuiApp struct {
 	leaving   string // the agent the screen is handing over to
 
 	history    []string // past searches, oldest first
+	continued  []string // agents continued into, newest first
 	histAt     int      // where ↑ is in history, -1 when not browsing
 	firstShown int      // the first card on screen, for 1-9
+	beyond     beyond   // where an empty answer can go next
 
 	after func() error
 	quit  bool
@@ -162,6 +166,7 @@ func newTUIApp(dir string, t *tui.Term) *tuiApp {
 	a.cwd = howCwd()
 	a.projects = howScope(a.cwd, "", false)
 	a.history, a.histAt = loadTUIHistory(dir), -1
+	a.continued = loadTUIContinued(dir)
 	return a
 }
 
@@ -275,7 +280,7 @@ func (a *tuiApp) say(msg string, good bool) {
 
 // reload rebuilds the list for the current scope and query.
 func (a *tuiApp) reload() {
-	if len(a.query) == 0 {
+	if a.box().text == "" {
 		a.loadHome()
 		return
 	}
@@ -305,7 +310,13 @@ func (a *tuiApp) loadHome() {
 	case scopeKept:
 		ss, total = a.kept, len(a.kept)
 	default:
-		ss, total, _ = tuiRecent(a.dir, a.scopeProjects(), 60)
+		// Filtered, the list is read whole: yesterday's sessions sit behind
+		// today's, and a cut taken first would drop them.
+		box, n := a.box(), 60
+		if box.active() {
+			n = 0
+		}
+		ss, total, _ = tuiRecent(a.dir, box.options(a.scopeProjects()), n)
 	}
 	a.setRows(ss, nil, total)
 	a.widened = false
@@ -321,8 +332,9 @@ func (a *tuiApp) setRows(ss []model.Session, hits []search.Hit, total int) {
 	}
 	a.listed = listed
 	var rows []tuiRow
+	box := a.box()
 	add := func(s model.Session, snips []string) {
-		if len(a.filter) > 0 && !a.filter[s.Harness] {
+		if len(a.filter) > 0 && !a.filter[s.Harness] || !box.keeps(s) {
 			return
 		}
 		rows = append(rows, tuiRow{s: s, snips: snips})
@@ -338,19 +350,28 @@ func (a *tuiApp) setRows(ss []model.Session, hits []search.Hit, total int) {
 		for _, s := range ss {
 			add(s, nil)
 		}
-		if a.scope != scopeKept {
+		if a.scope != scopeKept && !box.active() {
 			var behind []behindRow
 			for _, b := range a.behind {
 				if len(a.filter) == 0 || a.filter[b.s.Harness] {
 					behind = append(behind, b)
 				}
 			}
-			label, _ := a.sectionLabel()
-			rows = withBehind(behind, rows, label)
+			now := time.Now()
+			if a.clock != nil {
+				now = a.clock()
+			}
+			last := ""
+			for i := range rows {
+				if g := dayGroup(rows[i].s.Updated, now); g != last {
+					rows[i].section, last = g, g
+				}
+			}
+			rows = withBehind(behind, rows)
 		}
 	}
 	a.rows, a.total = rows, total
-	if len(a.filter) > 0 || a.scope == scopeKept {
+	if len(a.filter) > 0 || a.scope == scopeKept || box.active() {
 		a.total = len(rows)
 	}
 	a.sel, a.scroll = 0, 0
@@ -369,7 +390,9 @@ func (a *tuiApp) setRows(ss []model.Session, hits []search.Hit, total int) {
 
 func (a *tuiApp) startSearch() {
 	a.seq++
-	seq, q, projects, scope := a.seq, string(a.query), a.scopeProjects(), a.scope
+	seq, q, scope, box := a.seq, string(a.query), a.scope, a.box()
+	o := box.options(a.scopeProjects())
+	o.Limit = 80
 	a.searching = true
 	a.latest.Store(int64(seq))
 	// A search already overtaken by the next keystroke is not run: on a large
@@ -381,12 +404,14 @@ func (a *tuiApp) startSearch() {
 			return
 		}
 		start := time.Now()
-		o := search.Options{Query: q, Projects: projects, Limit: 80}
 		hits, err := tuiSearch(a.dir, o)
 		widened := false
-		if err == nil && len(hits) == 0 && scope == scopeHere && len(projects) > 0 && !stale() {
-			o.Projects = nil
-			hits, err = tuiSearch(a.dir, o)
+		// A project named with in: is what was asked for; only the tab's
+		// scope widens on its own.
+		if err == nil && len(hits) == 0 && scope == scopeHere && len(o.Projects) > 0 && len(box.projects) == 0 && !stale() {
+			wide := o
+			wide.Projects = nil
+			hits, err = tuiSearch(a.dir, wide)
 			widened = len(hits) > 0
 		}
 		took := float64(time.Since(start).Microseconds()) / 1000
@@ -402,10 +427,13 @@ func (a *tuiApp) startSearch() {
 			a.tookMS, a.widened = took, widened
 			refresh := a.listed == num(a.scope)+"\x00"+q
 			a.setRows(nil, hits, len(hits))
+			if len(a.rows) == 0 && scope != scopeKept {
+				go a.lookBeyond(a.listed, o, box, maps.Clone(a.filter))
+			}
 			// The banner offers the newest answer under ↵, so it is the
 			// one selected, on a new query only: a refresh of the same one
 			// keeps the reader's pick, which r or o is about to act on.
-			if n, s := dejaVu(q, a.rows); n > 0 && !refresh {
+			if n, s := dejaVu(box.text, a.rows); n > 0 && !refresh {
 				for i, r := range a.rows {
 					if sessionKey(r.s) == sessionKey(s) {
 						a.sel = i
@@ -421,62 +449,6 @@ func (a *tuiApp) selected() (model.Session, bool) {
 		return model.Session{}, false
 	}
 	return a.rows[a.sel].s, true
-}
-
-// resumeSelected leaves the screen and reopens the session in its own agent.
-func (a *tuiApp) resumeSelected() {
-	a.remember()
-	s, ok := a.current()
-	if !ok {
-		return
-	}
-	if d := a.details[sessionKey(s)]; d != nil && d.gone {
-		a.say(agentName(s.Harness)+" deleted this one. R puts it back first.", false)
-		return
-	}
-	a.after = func() error {
-		fmt.Fprintf(os.Stderr, "deja: resuming in %s\n", agentName(s.Harness))
-		pickedOnScreen = &s
-		return runResume(a.dir, []string{s.ID, "--exec"}, os.Stdout)
-	}
-	a.leaving = "Resuming in " + agentName(s.Harness) + "…"
-	a.quit = true
-}
-
-// putBack writes a session the agent deleted back where it reads it.
-func (a *tuiApp) putBack() {
-	s, ok := a.current()
-	if !ok {
-		return
-	}
-	d := a.details[sessionKey(s)]
-	if d == nil || !d.gone {
-		a.say("Still in "+agentName(s.Harness)+", nothing to put back.", false)
-		return
-	}
-	go func() {
-		err := writeBackSession(a.dir, d.full, io.Discard)
-		a.post(func() {
-			if err != nil {
-				a.say("Could not put it back: "+err.Error(), false)
-				return
-			}
-			d.gone = false
-			// Back where its agent reads it, it is no longer a kept one.
-			k := sessionKey(s)
-			delete(a.keptIDs, k)
-			for i, ks := range a.kept {
-				if sessionKey(ks) == k {
-					a.kept = append(a.kept[:i:i], a.kept[i+1:]...)
-					break
-				}
-			}
-			if a.scope == scopeKept && a.view != viewReader {
-				a.reload()
-			}
-			a.say("Put back. r resumes it in "+agentName(s.Harness)+".", true)
-		})
-	}()
 }
 
 // current is the session the actions apply to: the open one in the reader,
