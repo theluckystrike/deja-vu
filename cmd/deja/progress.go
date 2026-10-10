@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vshulcz/deja-vu/internal/index"
+	"github.com/vshulcz/deja-vu/internal/mark"
 )
 
 // The first build is the one moment a user waits on deja, and it used to be
@@ -159,7 +160,12 @@ func (p *buildProgress) render(frame int) []string {
 		info = append(info, fmt.Sprintf("%s%-*s%s  %s%*d%s sessions  %s%d%s messages",
 			logoDim, nameW, h.name, logoReset, logoBold, sessW, h.sessions, logoReset, logoDim, h.messages, logoReset))
 	}
-	return logoLines(info)
+	// The tail wags through the same cycle as the interactive screen: one pose
+	// every four frames (the display repaints at 80ms, so a pose every 320ms).
+	// The mark itself is never a static stamp while the first build runs (#4623).
+	mood := mark.Ready
+	mood.TailSet = mark.WagCycle[(frame/4)%len(mark.WagCycle)]
+	return logoLinesMood(info, mood)
 }
 
 func (p *buildProgress) bar() string {
