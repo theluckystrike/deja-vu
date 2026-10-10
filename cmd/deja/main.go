@@ -412,6 +412,12 @@ func run(args []string) error {
 			fmt.Print(wrapUsage(h, printableWidth(os.Stdout)))
 			return nil
 		}
+		// Not a command, so the words are a bare search, and --help after
+		// them was searched for along with them.
+		if !dispatchKnows(args[0]) && !strings.HasPrefix(args[0], "hook-") {
+			fmt.Print(wrapUsage(helpForCommand("search"), printableWidth(os.Stdout)))
+			return nil
+		}
 	}
 	switch args[0] {
 	case "show":
@@ -768,7 +774,7 @@ func cmdShow(dir string, rest []string, sourceInstance string) error {
 		return err
 	}
 	var s model.Session
-	var ok bool
+	var ok, prefixed bool
 	if o.harness != "" {
 		// The same pass the prefix form runs. Without it the exact-identity
 		// path read whatever was on disk, and a store below the redaction
@@ -784,6 +790,10 @@ func cmdShow(dir string, rest []string, sourceInstance string) error {
 		s, ok, err = index.FindByIdentity(dir, o.harness, o.id)
 		if err == nil && !ok {
 			s, ok, err = findByPrefixHarness(dir, o.id, o.harness)
+			prefixed = true
+			if err == nil && ok && o.json {
+				err = ambiguousJSONPrefixIn(dir, o.id, o.harness)
+			}
 		}
 	} else {
 		s, ok, err = findByPrefix(dir, o.id)
@@ -825,6 +835,8 @@ func cmdShow(dir string, rest []string, sourceInstance string) error {
 	}
 	if o.harness == "" {
 		noteAmbiguousPrefix(dir, o.id, "showing")
+	} else if prefixed {
+		noteAmbiguousPrefixIn(dir, o.id, o.harness, "showing")
 	}
 	// A day bucket's date is the day the index was built in, not the moment a
 	// line was written: read in another zone, `show` lists a record dated the
@@ -1780,7 +1792,13 @@ func searchWithOptions(dir string, args []string, sourceInstance string, bare bo
 	// the ranked order a script may rely on.
 	if o.All && !o.JSON && len(hits) > 1 {
 		sort.SliceStable(hits, func(i, j int) bool { return hits[i].Session.Updated.After(hits[j].Session.Updated) })
-		fmt.Fprintf(os.Stderr, "deja: all %d matches, newest first\n", len(hits))
+		// Under --limit the list is the top of the ranking, and "all 5
+		// matches" sat under "showing 5 of 40".
+		if o.Total > len(hits) {
+			fmt.Fprintln(os.Stderr, "deja: newest first")
+		} else {
+			fmt.Fprintf(os.Stderr, "deja: all %d matches, newest first\n", len(hits))
+		}
 	}
 	// Through a counter, so the log records what actually went out rather than
 	// a guess at it. `deja log` is the audit of what deja did, and the search
@@ -2698,6 +2716,29 @@ func ambiguousJSONPrefix(dir, id string) error {
 	return fmt.Errorf("%d sessions match %q — --json reads one; use a longer prefix (`deja last` prints ids whole)", n, id)
 }
 
+// searchAllows is the rule the ambiguity counts are taken under (#2401).
+func searchAllows() func(string) bool {
+	pol := policy.Load()
+	return func(project string) bool { return pol.Allows(policy.ActivationSearch, project) }
+}
+
+// ambiguousJSONPrefixIn is ambiguousJSONPrefix within one harness: --harness
+// narrows the prefix, and a prefix it still leaves ambiguous is refused the
+// same way.
+func ambiguousJSONPrefixIn(dir, id, harness string) error {
+	if n := index.PrefixMatchesIn(dir, id, harness, searchAllows()); n > 1 {
+		return fmt.Errorf("%d %s sessions match %q — --json reads one; use a longer prefix (`deja last` prints ids whole)", n, harness, id)
+	}
+	return nil
+}
+
+// noteAmbiguousPrefixIn is noteAmbiguousPrefix within one harness.
+func noteAmbiguousPrefixIn(dir, id, harness, action string) {
+	if n := index.PrefixMatchesIn(dir, id, harness, searchAllows()); n > 1 {
+		fmt.Fprintf(os.Stderr, "deja: %d %s sessions match %q — %s the most recent; use a longer prefix for another\n", n, harness, id, action)
+	}
+}
+
 // pickedOnScreen is the session the interactive screen handed to resume or
 // handoff. It is looked up by its exact identity, with no refresh first: after
 // an upgrade the refresh is a full rebuild, and the person who picked a
@@ -2728,15 +2769,26 @@ func findByPrefix(dir, p string) (model.Session, bool, error) {
 
 // findByPrefixHarness resolves an id prefix within one harness, so the
 // documented "deja show <id-prefix> --harness name" form works.
+// The prefix is resolved among that harness's sessions: picking the newest
+// across every harness and then refusing it said no session matches while one
+// in the named harness started with the prefix.
 func findByPrefixHarness(dir, p, harness string) (model.Session, bool, error) {
-	s, ok, err := findByPrefix(dir, p)
-	if err != nil || !ok {
-		return model.Session{}, false, err
+	if err := index.Ensure(dir, "", false, os.Stderr); err == nil {
+		if s, ok, err := index.FindByPrefixIn(dir, p, harness); err == nil {
+			if ok {
+				noteForgottenSource(s, p, true)
+			}
+			return s, ok, nil
+		}
 	}
-	if s.Harness != harness {
-		return model.Session{}, false, nil
+	var ss []model.Session
+	for _, s := range append(loadFileSources(), sources.LoadOpencodePrefix(p)...) {
+		if strings.EqualFold(s.Harness, harness) {
+			ss = append(ss, s)
+		}
 	}
-	return s, true, nil
+	s, ok := search.FindByPrefix(ss, p)
+	return s, ok, nil
 }
 
 func recent(dir string, n int) ([]model.Session, error) {
@@ -2981,6 +3033,14 @@ func parseSearch(args []string) (search.Options, error) {
 			if cmd := flagsOfOtherCommands[a]; cmd != "" {
 				return o, fmt.Errorf("%s is a flag of `deja %s`, not of search — put it after `--` to search for the text", a, cmd)
 			}
+			// A --word after the query is a flag deja does not have. Taken as
+			// a query term it turned `deja goroutines --bogus` into a search
+			// for both words that found nothing, where the word alone had 40
+			// hits. A query that starts with one (`--retry budget`), a phrase
+			// with a dash inside, or a single dash is still a query.
+			if len(q) > 0 && flagShaped(a) {
+				return o, fmt.Errorf("search: unknown flag %q — `deja search --help` lists its flags; put it after `--` to search for the text", a)
+			}
 			q = append(q, a)
 		}
 	}
@@ -2994,6 +3054,23 @@ func parseSearch(args []string) (search.Options, error) {
 		return o, fmt.Errorf("query required")
 	}
 	return o, nil
+}
+
+// flagShaped reports whether a token reads as a long flag: two dashes, then
+// letters, digits and inner dashes, nothing else.
+func flagShaped(a string) bool {
+	if len(a) < 3 || !strings.HasPrefix(a, "--") {
+		return false
+	}
+	for i, r := range a[2:] {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9', r == '-' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // flagsOfOtherCommands names the command each flag belongs to, for the tokens
@@ -4124,17 +4201,22 @@ func runForget(dir string, args []string) error {
 		// It goes above the counts, and the counts say whose run they are:
 		// under an ambiguous selector the numbers were those of
 		// `--all-matches`, while the command as typed drops nothing (#1032).
-		scope := error(nil)
-		if o.Session != "" {
-			scope = forgetScopeRefusal(o.Session, result.Sessions, allMatches)
-		}
-		if scope != nil {
-			fmt.Fprintln(os.Stdout, scope.Error())
+		// The refusal itself points here, so it is not repeated: this run is
+		// the listing it promises.
+		if o.Session != "" && forgetScopeRefusal(o.Session, result.Sessions, allMatches) != nil {
+			fmt.Fprintf(os.Stdout, "%q matches %d sessions — add --all-matches to drop them all\n", o.Session, result.Sessions)
 			fmt.Fprintf(os.Stdout, "dry run — nothing was changed\nas it stands this run drops nothing; with --all-matches it would drop: %s\nwould add: %s\n",
 				forgetCounts(result.Sessions, result.Messages), countNoun(result.Tombstones, "tombstone"))
 		} else {
 			fmt.Fprintf(os.Stdout, "dry run — nothing was changed\nwould drop: %s\nwould add: %s\n",
 				forgetCounts(result.Sessions, result.Messages), countNoun(result.Tombstones, "tombstone"))
+		}
+		// The ids, so the scope can be checked by name and not by a count
+		// alone: the refusal sends the reader here to see what would go.
+		if len(result.Keys) > 0 {
+			keys := append([]string(nil), result.Keys...)
+			sort.Strings(keys)
+			fmt.Fprintln(os.Stdout, "sessions: "+safeForStatusline(joinCapped(keys, 10), 400))
 		}
 		if line := forgetNotesLine(result); line != "" {
 			fmt.Fprintln(os.Stdout, line)

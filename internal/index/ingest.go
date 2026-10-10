@@ -398,7 +398,11 @@ func ensureLocked(dir string, o query.Options, force bool, progress io.Writer) e
 				}
 			}
 		}
-		return rebuildForSearch(dir, o, scope, want, progress)
+		// The same full build `deja index --force` runs. One of its own
+		// skipped the deleted transcripts, the turns a harness compacted
+		// away and the chats gone from a database store, so the first
+		// search after an upgrade dropped what the index was keeping.
+		return rebuild(dir, "", scope, want, progress)
 	}
 	if err := updateIndex(dir, o.Harness, scope, want, force, progress); err != nil {
 		return fmt.Errorf("update: %w", err)
@@ -871,8 +875,10 @@ func detectRenamedFiles(oldFiles, files map[string]FileState) map[string]string 
 
 // applyRenamedFiles moves a manifest from the old names to the new ones. The
 // records themselves do not move: their source path is interned, so one entry
-// in that table is every record's path at once.
-func applyRenamedFiles(m *Manifest, renamed map[string]string) {
+// in that table is every record's path at once. It returns the sessions the
+// move put in another project.
+func applyRenamedFiles(m *Manifest, renamed map[string]string) map[string]bool {
+	reprojected := map[string]bool{}
 	for _, np := range sortedKeys(renamed) {
 		op := renamed[np]
 		of, ok := m.Files[op]
@@ -882,9 +888,22 @@ func applyRenamedFiles(m *Manifest, renamed map[string]string) {
 		of.Path = np
 		m.Files[np] = of
 		delete(m.Files, op)
+		// A move to another directory can be a move to another project: a
+		// renamed checkout is a renamed Claude project folder. The project is
+		// what the reader says for the new path, as a rebuild would set it.
+		var moved []model.Session
+		if filepath.Dir(np) != filepath.Dir(op) {
+			moved, _ = parseAppendedFile("", np, FileState{}, true)
+		}
 		for key, meta := range m.Sessions {
 			if meta.Path == op {
 				meta.Path = np
+				for _, s := range moved {
+					if s.Harness+":"+s.ID == key && s.Project != "" && s.Project != meta.Project {
+						meta.Project = s.Project
+						reprojected[key] = true
+					}
+				}
 				m.Sessions[key] = meta
 			}
 		}
@@ -900,6 +919,27 @@ func applyRenamedFiles(m *Manifest, renamed map[string]string) {
 			}
 		}
 	}
+	return reprojected
+}
+
+// reprojectSidecars files the tables a session feeds under the project a
+// rename moved it to. Nothing was read, so the pairs keep their rows and take
+// the new project; the command tables are mined again from the records.
+func reprojectSidecars(dir string, sessions map[string]SessionMeta, keys map[string]bool) {
+	if pairs := ReadFixes(dir); len(pairs) > 0 {
+		dirty := false
+		for i, p := range pairs {
+			if keys[p.Key] {
+				pairs[i].Project, dirty = sessions[p.Key].Project, true
+			}
+		}
+		if dirty {
+			_ = writeGobAtomic(fixesPath(dir), pairs)
+		}
+	}
+	buildCommandsFromIndex(dir)
+	buildCommandFailsFromIndex(dir, nil, nil)
+	buildSessionFactsFromIndex(dir)
 }
 
 // orphanState is what a full rebuild has to carry: sessions whose transcript
@@ -935,6 +975,10 @@ func orphanedSessions(dir, harness string, files map[string]FileState) orphanSta
 	}
 	want := map[string]bool{}
 	var present map[string]bool
+	moved := map[string]bool{}
+	for _, op := range detectRenamedFiles(m.Files, files) {
+		moved[op] = true
+	}
 	for _, p := range sortedKeys(m.Files) {
 		if p == syncImportPath {
 			continue // importedSessions carries these
@@ -953,6 +997,11 @@ func orphanedSessions(dir, harness string, files map[string]FileState) orphanSta
 		}
 		if _, err := os.Lstat(p); err == nil {
 			continue // on disk after all, just not in this pass's set
+		}
+		// Renamed or moved to another folder: read from where it is now,
+		// as the incremental pass follows it.
+		if moved[p] {
+			continue
 		}
 		if !deletedFromLiveStore(p) {
 			continue
@@ -1460,33 +1509,6 @@ func forgetUnreadStores(files map[string]FileState) {
 	}
 }
 
-func rebuildForSearch(dir string, o query.Options, scope string, files map[string]FileState, progress io.Writer) error {
-	defer readTo(files)()
-	beginPass()
-	tmp := dir + ".tmp"
-	_ = os.RemoveAll(tmp)
-	if err := os.MkdirAll(filepath.Join(tmp, "buckets"), 0o700); err != nil {
-		return err
-	}
-	// The same phase reporting rebuild() has. Without it the first run of a
-	// search — which is how almost everyone builds their index the first time,
-	// rather than by typing `deja index` — showed a spinner reading "starting"
-	// and a bar frozen at one notch for the whole build.
-	total := 0
-	progressWeights = filesPerHarness(files)
-	for _, n := range progressWeights {
-		total += n
-	}
-	reportPhase("reading sessions", total)
-	ss := sources.FilterSessions(filterTombstoned(loadProgress("", progress)))
-	forgetUnreadStores(files)
-	imported := importedSessions(dir)
-	imported.compactions = compactionsForRebuild(dir, readTombstones())
-	ss = append(ss, imported.sessions...)
-	ss = filterTombstoned(ss)
-	return writeSessionsWithSync(tmp, dir, ss, files, scope, imported)
-}
-
 // dropEmptySessions removes manifest rows that ended up with no records.
 //
 // A session whose every message strips to empty — harness plumbing, a prompt
@@ -1961,12 +1983,6 @@ func eachIndexKey(text string, when time.Time, fn func(tok string)) {
 	}
 }
 
-// eachTextKey is eachIndexKey without the date keys, for the caller that keys
-// text alone.
-func eachTextKey(text string, fn func(tok string)) {
-	textKeys(text, dedupe(fn))
-}
-
 // textKeys emits every key the text contributes, repeats included; the callers
 // above put one dedupe in front of it rather than one per source.
 func textKeys(text string, emit func(tok string)) {
@@ -2336,60 +2352,6 @@ func askedHashes(ms []model.Message) []uint64 {
 	return out
 }
 
-// askedFromRecords is askedHashes for the import path, which holds a session as
-// records rather than messages. Imported sessions used to carry no Asked, so
-// the brief's asked-twice line — which reads meta.Asked — never saw a repeat
-// that crossed a sync boundary, while stats' RepeatQuestions (from records)
-// counted it. The two disagreed on the same store.
-func askedFromRecords(recs []Record) []uint64 {
-	var out []uint64
-	seen := map[uint64]bool{}
-	for _, r := range recs {
-		if r.Role != "user" {
-			continue
-		}
-		v, ok := askedHashOf(r.Text)
-		if !ok || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-		if len(out) >= askedQuestionCap {
-			break
-		}
-	}
-	return out
-}
-
-// countedFromRecords is the message count local ingest keeps as Counted: the
-// records that are a turn of the conversation, not the work records deja
-// derives beside them. It feeds the corpus size the ranking divides by, so an
-// imported session with none counted as a single document (#2569).
-func countedFromRecords(recs []Record) int {
-	n := 0
-	for _, r := range recs {
-		if r.Role == roleFiles || r.Role == roleCommand || r.Role == roleEdit {
-			continue
-		}
-		n++
-	}
-	return n
-}
-
-// wordsFromRecords is sessionWords over the same records: the document length
-// BM25 normalises by. Without it an imported session is scored on the length of
-// the match alone, which is the marathon-wins case search.go describes.
-func wordsFromRecords(recs []Record) int {
-	ms := make([]model.Message, 0, len(recs))
-	for _, r := range recs {
-		if r.Role == roleFiles || r.Role == roleCommand || r.Role == roleEdit {
-			continue
-		}
-		ms = append(ms, model.Message{Role: r.Role, Text: r.Text})
-	}
-	return sessionWords(ms)
-}
-
 // notAsked rejects the text a harness writes under the user role: hook
 // envelopes, interruption notices, resume preambles, the compaction summary.
 // It repeats across sessions by construction, so without this the most
@@ -2524,25 +2486,6 @@ func topTouchedFiles(ms []model.Message) []string {
 		countTouchedPaths(count, m.Text)
 	}
 	return rankTouched(count)
-}
-
-// touchedFromRecords is topTouchedFiles for the import path, which holds a
-// session as records rather than messages. Imported sessions used to carry no
-// Touched, so `deja blame` — which reads it — could not attribute a peer's
-// edits even though `search --role files` surfaced the same records.
-// touchedFromRecords derives the touched-file ranking and the counts behind it.
-// The counts were computed here and thrown away, so an imported session carried
-// a ranking nothing could merge — the shape #1333 fixed for local ingest, still
-// standing for peers (#2558).
-func touchedFromRecords(recs []Record) ([]string, []int) {
-	count := map[string]int{}
-	for _, r := range recs {
-		if r.Role != roleFiles {
-			continue
-		}
-		countTouchedPaths(count, r.Text)
-	}
-	return rankTouchedCounted(count)
 }
 
 // countTouchedPaths tallies the file paths in one `files` record's text, one
@@ -3665,10 +3608,10 @@ func copyIngestFiles(old map[string]FileIngest, reread map[string]FileState) map
 // before writing left its count for the next one to report: one bad line on
 // disk, "2 lines skipped" on screen, with the manifest agreeing (#2010).
 //
-// Called at every place a pass parses: this one, rebuildForSearch — which a
-// recall reaches directly once an index is found damaged, without passing
-// through updateIndex at all — and rebuildWithTombstones, which forget and
-// unforget call for themselves.
+// Called at every place a pass parses: this one and rebuildWithTombstones,
+// which a recall reaches directly once an index is found damaged, without
+// passing through updateIndex at all, and which forget and unforget call for
+// themselves.
 func beginPass() {
 	sources.DiagSnapshot()
 	passParsed = nil
@@ -3728,10 +3671,14 @@ func updateIndex(dir, harness, scope string, files map[string]FileState, force b
 	// answering once and nothing on any screen saying so (#3546).
 	if err == nil && !force {
 		if pairs := detectRenamedFiles(old.Files, files); len(pairs) > 0 {
-			applyRenamedFiles(&old, pairs)
+			reprojected := applyRenamedFiles(&old, pairs)
 			// Failing to record it costs the duplicate this exists to avoid,
 			// not correctness: the pass below then treats the file as new.
-			if werr := writeManifest(dir, old); werr == nil && progress != nil {
+			werr := writeManifest(dir, old)
+			if werr == nil && len(reprojected) > 0 {
+				reprojectSidecars(dir, old.Sessions, reprojected)
+			}
+			if werr == nil && progress != nil {
 				fmt.Fprintf(progress, "deja: %d transcript%s renamed — the index followed the new name\n", len(pairs), pluralS(len(pairs)))
 			}
 		}
@@ -4756,8 +4703,11 @@ func appendIncremental(dir, harness, scope string, old Manifest, files map[strin
 					return filesTouched, messages, 0, err
 				}
 				messages++
+				// Keyed the way a rebuild keys it: only the part that earns
+				// postings, its date keys, and the tool bit.
 				var keyErr error
-				eachTextKey(text, func(tok string) {
+				tool := isToolRole(msg.Role)
+				eachIndexKey(tokenizedPart(msg.Role, text), msg.Time, func(tok string) {
 					if keyErr != nil {
 						return
 					}
@@ -4766,7 +4716,7 @@ func appendIncremental(dir, harness, scope string, old Manifest, files map[strin
 						keyErr = err
 						return
 					}
-					data[tok] = append(data[tok], posting{Off: off, Sid: meta.Ord})
+					data[tok] = append(data[tok], posting{Off: off, Sid: meta.Ord, Tool: tool})
 				})
 				if keyErr != nil {
 					return filesTouched, messages, 0, keyErr

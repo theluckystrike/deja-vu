@@ -76,6 +76,11 @@ func mcpOrient(dir, name string, raw json.RawMessage) (string, int, error) {
 		if note := policyHiddenNote(policy.ActivationMCP, hidden); note != "" {
 			return strings.TrimSpace(note), 0, nil
 		}
+		// Sessions with nothing to orient by are still sessions: saying none
+		// worked here sent an agent away from history recall had.
+		if n := orientSessionCount(dir, scope); n > 0 {
+			return fmt.Sprintf("%s worked in %s, but no command or file repeats across them. Recall with project %q reads what they said.", pluralSessions(n), where, where), 0, nil
+		}
 		return fmt.Sprintf("No past session on this machine worked in %s.", where) + emptyStoreNote(dir), 0, nil
 	}
 
@@ -153,6 +158,22 @@ type orientFile struct {
 	Path     string
 	Sessions int
 	Last     time.Time
+}
+
+// orientSessionCount is how many sessions the trust policy shows in scope.
+func orientSessionCount(dir string, projects []string) int {
+	metas, err := index.AllMeta(dir)
+	if err != nil {
+		return 0
+	}
+	pol := policy.Load()
+	n := 0
+	for _, m := range metas {
+		if howProjectMatches(m.Project, projects) && pol.Allows(policy.ActivationMCP, m.Project) && !pol.Ignored(m.Path, m.Project) {
+			n++
+		}
+	}
+	return n
 }
 
 // orientFiles ranks what this project's sessions worked on, from the manifest
