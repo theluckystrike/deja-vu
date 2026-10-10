@@ -92,25 +92,61 @@ func drain(t *testing.T, a *tuiApp) {
 	}
 }
 
-func TestTUIHomeLeadsWithWhatWasConcluded(t *testing.T) {
+// A card leads with what was asked, the conclusion dim under it, and the home
+// list groups the cards by day.
+func TestTUIHomeLeadsWithWhatWasAsked(t *testing.T) {
 	dir, _ := tuiStore(t)
 	a := newTestTUI(t, dir)
 	if len(a.rows) != 3 || a.rows[0].s.ID != "c3333333-hook" {
 		t.Fatalf("home rows = %+v", a.rows)
 	}
+	if a.rows[0].section != "Yesterday" || a.rows[1].section != "This week" || a.rows[2].section != "" {
+		t.Errorf("sections = %q %q %q", a.rows[0].section, a.rows[1].section, a.rows[2].section)
+	}
 	s := screen(a.frame(120, 36))
-	wantOnScreen(t, s, "◆ deja", "All projects", "RECENT", "3 sessions · 1 agents",
-		"Verify against every published key", "Claude Code · payments · 1d ago",
-		"ASKED", "webhook signature fails", "CONCLUDED", "Read", "Resume", "Continue in")
+	wantOnScreen(t, s, "◆ deja", "All projects", "YESTERDAY  1", "THIS WEEK  2", "3 sessions · 1 agents",
+		"Claude Code · payments · yesterday", "payments · 2d ago",
+		"ASKED", "CONCLUDED", "Read", "Resume", "Continue in")
+	lines, found := strings.Split(s, "\n"), false
+	for i, ln := range lines {
+		if strings.Contains(ln, "webhook signature fails after key rotation") && !strings.Contains(ln, "ASKED") {
+			if i+2 >= len(lines) || !strings.Contains(lines[i+1], "Claude Code · payments") ||
+				!strings.Contains(lines[i+2], "Verify against every published key") {
+				t.Errorf("card is not question, meta, conclusion:\n%s", s)
+			}
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("no card leads with the question:\n%s", s)
+	}
 	// Narrow, the list takes the width and the preview goes.
 	s = screen(a.frame(80, 30))
 	if strings.Contains(s, "ASKED") {
 		t.Errorf("no preview at 80 columns:\n%s", s)
 	}
-	wantOnScreen(t, s, "Derive the idempotency key")
+	wantOnScreen(t, s, "the retry double charges the card", "Derive the idempotency key")
 	// Short, the agent strip goes before the list does.
 	s = screen(a.frame(100, 14))
-	wantOnScreen(t, s, "Retire pool connections")
+	wantOnScreen(t, s, "webhook signature fails")
+}
+
+func TestTUIDayGroups(t *testing.T) {
+	now := time.Date(2026, 3, 4, 0, 30, 0, 0, time.UTC)
+	for at, want := range map[time.Time]string{
+		{}:                         "Earlier",
+		now.Add(time.Hour):         "Today",
+		now.Add(-20 * time.Minute): "Today",
+		now.Add(-time.Hour):        "Yesterday",
+		now.AddDate(0, 0, -2):      "This week",
+		now.AddDate(0, 0, -6):      "This week",
+		now.AddDate(0, 0, -7):      "Earlier",
+	} {
+		if got := dayGroup(at, now); got != want {
+			t.Errorf("dayGroup(%v) = %q, want %q", at, got, want)
+		}
+	}
 }
 
 func TestTUISearchAndEmptyState(t *testing.T) {
@@ -305,7 +341,9 @@ func TestTUIContinueIn(t *testing.T) {
 		t.Fatal("ctrl-o opens continue-in")
 	}
 	s := screen(a.frame(120, 40))
-	wantOnScreen(t, s, "Continue this session in…", "ALSO SUPPORTED", "Copy for")
+	wantOnScreen(t, s, "Continue this session in…", "+41 not installed here", "Show them")
+	a.handle(tui.Event{Kind: tui.EvKey, Key: tui.KeyEnter})
+	wantOnScreen(t, screen(a.frame(120, 40)), "Copy for")
 	for _, k := range []tui.Key{tui.KeyDown, tui.KeyRight, tui.KeyLeft, tui.KeyUp, tui.KeyTab} {
 		a.handle(tui.Event{Kind: tui.EvKey, Key: k})
 	}
@@ -380,7 +418,7 @@ func TestTUIResumeAndPutBack(t *testing.T) {
 	}
 	a.setScope(scopeKept)
 	s := screen(a.frame(120, 36))
-	wantOnScreen(t, s, "Kept 1", "KEPT AFTER THEIR AGENT DELETED THEM", "Kept after deletion", "Put back")
+	wantOnScreen(t, s, "Deleted 1", "DELETED BY THEIR AGENT, KEPT BY DEJA", "Deleted by Claude Code", "deja kept a copy", "Put back")
 	a.listFocus = true
 	a.handle(tui.Event{Kind: tui.EvKey, Key: tui.KeyRune, Rune: 'r'})
 	if a.quit || !strings.Contains(a.toast, "R puts it back") {
@@ -391,8 +429,8 @@ func TestTUIResumeAndPutBack(t *testing.T) {
 	if _, err := os.Stat(path); err != nil || !strings.Contains(a.toast, "Put back") {
 		t.Errorf("put back: %v, toast %q", err, a.toast)
 	}
-	// Put back, it leaves Kept.
-	if len(a.kept) != 0 || len(a.rows) != 0 || strings.Contains(screen(a.frame(120, 36)), "Kept 1") {
+	// Put back, it leaves Deleted.
+	if len(a.kept) != 0 || len(a.rows) != 0 || strings.Contains(screen(a.frame(120, 36)), "Deleted 1") {
 		t.Errorf("still kept: %d kept, %d rows", len(a.kept), len(a.rows))
 	}
 	a.setScope(scopeAll)

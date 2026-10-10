@@ -11,13 +11,14 @@ import (
 )
 
 type modalState struct {
-	sel     int
-	cols    int // the continue grid's, as last drawn
-	filter  []rune
-	src     model.Session
-	targets []continueTarget
-	picked  map[string]bool
-	ids     []string
+	sel      int
+	cols     int  // the continue grid's, as last drawn
+	expanded bool // the continue grid shows the agents not installed here
+	filter   []rune
+	src      model.Session
+	targets  []continueTarget
+	picked   map[string]bool
+	ids      []string
 }
 
 func (a *tuiApp) openModal(m int) {
@@ -37,6 +38,12 @@ func (a *tuiApp) openModal(m int) {
 func (a *tuiApp) handleModal(ev tui.Event) {
 	if a.modal == modalNews {
 		a.handleNews(ev)
+		return
+	}
+	if a.modal == modalForget {
+		if ev.Kind == tui.EvKey {
+			a.handleForget(ev)
+		}
 		return
 	}
 	if ev.Kind == tui.EvPaste && (a.modal == modalContinue || a.modal == modalPalette) {
@@ -116,6 +123,10 @@ func (a *tuiApp) modalEnter() {
 		if a.m.sel >= len(ts) {
 			return
 		}
+		if ts[a.m.sel].more > 0 {
+			a.m.expanded = true
+			return
+		}
 		a.continueIn(ts[a.m.sel])
 	}
 }
@@ -126,6 +137,7 @@ func (a *tuiApp) modalEnter() {
 func (a *tuiApp) continueIn(t continueTarget) {
 	s := a.m.src
 	a.modal = modalNone
+	a.rememberContinued(t.id)
 	if t.paste || !t.installed {
 		a.copySession(s, "paste it into "+agentName(t.id))
 		return
@@ -156,11 +168,7 @@ func (a *tuiApp) copySession(s model.Session, hint string) {
 		return
 	}
 	text := handoffPrompt(digestHandoff(d.full))
-	copyText := func(s string) error { return tuiCopy(a.t.Write, s) }
-	if a.copy != nil {
-		copyText = a.copy
-	}
-	if err := copyText(text); err != nil {
+	if err := a.clip(text); err != nil {
 		a.say("Could not copy: "+err.Error(), false)
 		return
 	}
@@ -189,6 +197,8 @@ func (a *tuiApp) drawModal() {
 		a.drawPalette()
 	case modalNews:
 		a.drawNews()
+	case modalForget:
+		a.drawForget()
 	}
 }
 
@@ -274,11 +284,11 @@ func (a *tuiApp) drawHelp() {
 		title string
 		keys  [][2]string
 	}{
-		{"FIND", [][2]string{{"type", "search as you type"}, {"tab", "this project / all / kept"}, {"↑↓ 1-9", "pick a session"}, {"↑ on empty", "past searches"}, {"a", "filter by agent"}}},
-		{"READ", [][2]string{{"↵", "open at the match"}, {"n N", "next / previous match"}, {"t", "unfold long messages"}, {"g G", "top / bottom"}, {"esc", "back to the list"}}},
-		{"ACT", [][2]string{{"r", "resume in its agent"}, {"o", "continue in any agent"}, {"c", "copy the context"}, {"R", "put a deleted one back"}, {"^k", "every command by name"}}},
+		{"FIND", [][2]string{{"type", "search as you type"}, {"tab", "this project / all / deleted"}, {"↑↓ 1-9", "pick a session"}, {"↑ on empty", "past searches"}, {"a", "filter by agent"}}},
+		{"READ", [][2]string{{"↵", "open at the match"}, {"/", "find in the session"}, {"n N", "next / previous match"}, {"] [", "next / previous turn"}, {"t", "unfold long messages"}, {"g G", "top / bottom"}, {"esc", "back to the list"}}},
+		{"ACT", [][2]string{{"r", "resume in its agent"}, {"o", "continue in any agent"}, {"c", "copy the context"}, {"R", "put a deleted one back"}, {"^k", "copy id, path, forget…"}}},
 	}
-	x, y, iw := a.modalBox(100, 12)
+	x, y, iw := a.modalBox(100, 16)
 	right := x + iw
 	cx := p.Put(x, y, "Keys", bold(cText), right)
 	p.Put(cx+3, y, "the three you need: type, ↵, o", fgs(cMuted), right)
@@ -292,5 +302,12 @@ func (a *tuiApp) drawHelp() {
 			p.PutClip(kx+1, y+1+i, k[1], fgs(cSub), cx+colW-1)
 		}
 	}
-	p.Put(x, y+7, "The mouse works too: click a card, double-click to open, scroll anywhere.", fgs(cMuted), right)
+	// The words the box takes as filters, each drawn as the chip it becomes.
+	fx := p.Put(x, y+9, "FILTERS", fgs(cMuted), right) + 2
+	chip := tui.Style{FG: cAcc, BG: cOver, Bold: true, Reverse: p.mono}
+	for _, f := range [][2]string{{"codex:", "one agent"}, {"today", "yesterday, week, month"}, {"in:api", "one project"}} {
+		fx = p.Put(fx, y+9, f[0], chip, right)
+		fx = p.Put(fx+1, y+9, f[1], fgs(cSub), right) + 3
+	}
+	p.PutClip(x, y+11, "The mouse works too: click a card, double-click to open, scroll anywhere.", fgs(cMuted), right)
 }

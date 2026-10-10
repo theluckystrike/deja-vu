@@ -20,7 +20,10 @@ func TestTUIDataHelpers(t *testing.T) {
 		now.Add(-30 * time.Second): "just now",
 		now.Add(-5 * time.Minute):  "5m ago",
 		now.Add(-3 * time.Hour):    "3h ago",
+		now.Add(-13 * time.Hour):   "yesterday",
+		now.Add(-40 * time.Hour):   "2d ago",
 		now.Add(-72 * time.Hour):   "3d ago",
+		now.AddDate(0, 0, -7):      "Feb 25",
 		now.AddDate(0, -1, 0):      "Feb 4",
 		now.AddDate(-1, 0, 0):      "Mar 4 2025",
 	} {
@@ -76,14 +79,21 @@ func TestContinueTargetsAndGrid(t *testing.T) {
 	if !last.paste || len(ts) != len(handoffTargets())+len(handoffPasteOnly) {
 		t.Errorf("paste-only last, all listed: %+v (%d)", last, len(ts))
 	}
-	pos, split := continueGrid(ts[:5], 3)
-	if split != 2 || pos[2] != [2]int{1, 0} || pos[4] != [2]int{1, 2} {
-		t.Errorf("grid = %v split %d", pos, split)
+	// No labels: a block starts its own row after one blank line.
+	pos, line := continueGrid(ts[:5], 2)
+	if pos[2] != [2]int{1, 0} || pos[4] != [2]int{2, 0} || line[1] != 0 || line[2] != 2 || line[4] != 3 {
+		t.Errorf("grid = %v lines %v", pos, line)
 	}
-	if gridMove(pos, 4, -1) != 1 || gridMove(pos, 0, 1) != 2 || gridMove(pos, 9, 1) != 9 || gridMove(pos, 0, -1) != 0 {
+	// The folded line takes the next cell, with no gap above it.
+	pos, line = continueGrid(append(ts[:1:1], continueTarget{more: 3}), 2)
+	if line[1] != 0 || pos[1] != [2]int{0, 1} {
+		t.Errorf("fold at line %v", line)
+	}
+	pos, _ = continueGrid(ts[:5], 2)
+	if gridMove(pos, 4, -1) != 2 || gridMove(pos, 0, 1) != 2 || gridMove(pos, 9, 1) != 9 || gridMove(pos, 0, -1) != 0 {
 		t.Error("gridMove")
 	}
-	if gridCols(80) != 3 || gridCols(50) != 2 || gridCols(20) != 1 {
+	if gridCols(80) != 2 || gridCols(50) != 2 || gridCols(20) != 1 {
 		t.Error("gridCols")
 	}
 	if ts := continueTargets(nil, nil); len(ts) == 0 {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ type tuiRow struct {
 type tuiDetail struct {
 	full        model.Session
 	conclusions []string
+	story       tuiStory
 	gone        bool
 	err         error
 }
@@ -64,9 +66,11 @@ func tuiSearch(dir string, o search.Options) ([]search.Hit, error) {
 	return d.Hits, err
 }
 
-// tuiRecent is the home list: the newest sessions in scope.
-func tuiRecent(dir string, projects []string, n int) ([]model.Session, int, error) {
-	ss, total, err := index.RecentMatchingCounted(dir, n, search.Options{Projects: projects})
+// tuiRecent is the home list: the newest sessions in scope, under whatever
+// filters the box holds.
+func tuiRecent(dir string, o search.Options, n int) ([]model.Session, int, error) {
+	o.Query = ""
+	ss, total, err := index.RecentMatchingCounted(dir, n, o)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -99,6 +103,7 @@ func tuiLoadDetail(dir string, s model.Session) *tuiDetail {
 		d.full = full
 	}
 	d.conclusions = tuiConclusions(d.full, 3)
+	d.story = tuiStoryOf(d.full)
 	d.gone = !strings.HasPrefix(s.Project, "imported:") && transcriptGone(d.full)
 	return d
 }
@@ -153,24 +158,58 @@ type agentCount struct {
 	n int
 }
 
-// tuiAgo is a card's date: relative while it is recent, a date after.
+// daysBefore counts calendar days from t back from now, in now's zone: 0 is
+// today, 1 yesterday. A time ahead of now counts as today.
+func daysBefore(t, now time.Time) int {
+	t = t.In(now.Location())
+	day := func(x time.Time) time.Time {
+		return time.Date(x.Year(), x.Month(), x.Day(), 12, 0, 0, 0, now.Location())
+	}
+	return max(0, int(math.Round(day(now).Sub(day(t)).Hours()/24)))
+}
+
+// dayGroup is the date heading a home card goes under.
+func dayGroup(t, now time.Time) string {
+	if t.IsZero() {
+		return "Earlier"
+	}
+	switch d := daysBefore(t, now); {
+	case d == 0:
+		return "Today"
+	case d == 1:
+		return "Yesterday"
+	case d < 7:
+		return "This week"
+	}
+	return "Earlier"
+}
+
+// tuiAgo is a session's date on the cards, the preview and the reader:
+// relative within the week, a short date after. Past the first hour it counts
+// calendar days, the way the home list's day headings do, so a card under
+// Yesterday says yesterday.
 func tuiAgo(t, now time.Time) string {
 	if t.IsZero() {
 		return "-"
 	}
 	d := now.Sub(t)
-	switch {
-	case d < 0:
-		return t.Format("Jan 2")
+	if d < 0 {
+		return t.In(now.Location()).Format("Jan 2")
+	}
+	switch days := daysBefore(t, now); {
 	case d < time.Minute:
 		return "just now"
 	case d < time.Hour:
 		return num(int(d.Minutes())) + "m ago"
-	case d < 24*time.Hour:
+	case days == 0:
 		return num(int(d.Hours())) + "h ago"
-	case d < 14*24*time.Hour:
-		return num(int(d.Hours()/24)) + "d ago"
-	case t.Year() == now.Year():
+	case days == 1:
+		return "yesterday"
+	case days < 7:
+		return num(days) + "d ago"
+	}
+	t = t.In(now.Location())
+	if t.Year() == now.Year() {
 		return t.Format("Jan 2")
 	}
 	return t.Format("Jan 2 2006")
